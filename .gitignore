@@ -4,3 +4,4 @@ lib/
 *.rgb
 pyvenv.cfg
 *.wav
+.DS_Store

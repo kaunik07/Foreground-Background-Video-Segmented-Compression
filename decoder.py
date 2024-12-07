@@ -83,10 +83,19 @@ sample = "Stairs"
 file_path = f"960x540/{sample}.rgb"
 audio_path = f"audio/{sample}.wav"
 width, height = 960, 540
+audio_file  = True
 
-if os.path.exists(file_path) and os.path.exists(audio_path):
-    frames, total_frames = read_rgb_video(file_path, width, height)
-    print(f"Loaded {total_frames} frames.")
-    play_rgb_video_with_keyboard(frames, audio_path)
+if(audio_file):
+    if os.path.exists(file_path) and os.path.exists(audio_path):
+        frames, total_frames = read_rgb_video(file_path, width, height)
+        print(f"Loaded {total_frames} frames.")
+        play_rgb_video_with_keyboard(frames, audio_path)
+    else:
+        print("Video or audio file not found. Please check the file paths.")
 else:
-    print("Video or audio file not found. Please check the file paths.")
+    if os.path.exists(file_path) and os.path.exists(audio_path):
+        frames, total_frames = read_rgb_video(file_path, width, height)
+        print(f"Loaded {total_frames} frames.")
+        play_rgb_video_with_keyboard(frames, audio_path)
+    else:
+        print("Video file not found. Please check the file paths.")

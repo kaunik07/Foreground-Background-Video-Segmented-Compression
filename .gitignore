@@ -5,3 +5,7 @@ lib/
 pyvenv.cfg
 *.wav
 .DS_Store
+*.cmp
+de.py
+en.py
+log.txt

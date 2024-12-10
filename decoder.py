@@ -1,101 +1,126 @@
+import sys
 import numpy as np
 import cv2
-import os
-import pygame
-import threading
+from scipy.fftpack import idct
 
-def read_rgb_video(file_path, width, height):
-    """Reads the .RGB video file and returns a list of frames."""
-    frame_size = width * height * 3
-    file_size = os.path.getsize(file_path)
-    frame_count = file_size // frame_size
-    print(f"Calculated Frame Count: {frame_count}")
-    with open(file_path, 'rb') as f:
-        raw_data = f.read()
-    if len(raw_data) % frame_size != 0:
-        print("Warning: File size does not perfectly match frame dimensions.")
-    frames = [
-        np.frombuffer(raw_data[i * frame_size:(i + 1) * frame_size], dtype=np.uint8).reshape((height, width, 3))
-        for i in range(frame_count)
-    ]
-    return frames, frame_count
+def block_idct(coeff_block):
+    return idct(idct(coeff_block, axis=1, norm='ortho'), axis=0, norm='ortho')
 
-def play_audio(audio_path):
-    """Plays the audio using pygame with its native sampling rate (44.1 kHz)."""
-    pygame.mixer.init(frequency=44100)  # Set audio to 44.1 kHz
-    pygame.mixer.music.load(audio_path)
-    pygame.mixer.music.play()
+def dequantize_block(q_block, q_step):
+    Q = 2**q_step
+    return q_block * Q
 
-def play_rgb_video_with_keyboard(frames, audio_path):
-    """Plays the RGB video frames with keyboard controls."""
-    fps = 30  # Video playback is fixed at 30 FPS
-    audio_thread = threading.Thread(target=play_audio, args=(audio_path,))
-    audio_thread.start()
+def reconstruct_frame(frame_blocks, n1, n2, padded_width, padded_height, original_width, original_height):
+    reconstructed = np.zeros((padded_height, padded_width, 3), dtype=np.float32)
+    blocks_per_row = padded_width // 8
 
-    is_playing = True  # Start in play mode
-    frame_index = 0
+    for i, (block_type, rQ, gQ, bQ) in enumerate(frame_blocks):
+        q_step = n1 if block_type == 1 else n2
+        r_dct = dequantize_block(rQ, q_step)
+        g_dct = dequantize_block(gQ, q_step)
+        b_dct = dequantize_block(bQ, q_step)
+
+        r_block = np.clip(block_idct(r_dct), 0, 255)
+        g_block = np.clip(block_idct(g_dct), 0, 255)
+        b_block = np.clip(block_idct(b_dct), 0, 255)
+
+        block_row = i // blocks_per_row
+        block_col = i % blocks_per_row
+
+        y = block_row*8
+        x = block_col*8
+        reconstructed[y:y+8, x:x+8, 0] = r_block
+        reconstructed[y:y+8, x:x+8, 1] = g_block
+        reconstructed[y:y+8, x:x+8, 2] = b_block
+
+    reconstructed = reconstructed.astype(np.uint8)
+    # Crop to original size
+    cropped_frame = reconstructed[0:original_height, 0:original_width, :]
+    return cropped_frame
+
+def read_cmp_file(filename):
+    with open(filename, 'r') as f:
+        lines = f.read().strip().split('\n')
+
+    n1, n2 = map(int, lines[0].split())
+    data_lines = lines[1:]
+
+    # Known or stored dimensions:
+    original_width = 960
+    original_height = 540
+    padded_width = 960
+    padded_height = 544
+
+    blocks_per_row = padded_width // 8
+    blocks_per_col = padded_height // 8
+    blocks_per_frame = blocks_per_row * blocks_per_col
+
+    frame_count = len(data_lines) // blocks_per_frame
+
+    frames = []
+    idx = 0
+    for _ in range(frame_count):
+        frame_blocks = []
+        for _b in range(blocks_per_frame):
+            parts = data_lines[idx].split()
+            idx += 1
+            block_type = int(parts[0])
+            r_coeffs = np.array(list(map(int, parts[1:65]))).reshape(8,8)
+            g_coeffs = np.array(list(map(int, parts[65:129]))).reshape(8,8)
+            b_coeffs = np.array(list(map(int, parts[129:193]))).reshape(8,8)
+            frame_blocks.append((block_type, r_coeffs, g_coeffs, b_coeffs))
+        frames.append(frame_blocks)
+
+    return n1, n2, frames, padded_width, padded_height, original_width, original_height
+
+def main():
+    # if len(sys.argv) != 3:
+    #     print("Usage: mydecoder.exe input_video.cmp input_audio.wav")
+    #     return
+
+    cmp_file = "WalkingMovingBackground.cmp"
+    # audio_file = sys.argv[2]
+
+    n1, n2, frames, padded_width, padded_height, original_width, original_height = read_cmp_file(cmp_file)
+    total_frames = len(frames)
+    print(f"n1: {n1}, n2: {n2}")
+    print(f"Frame dimensions: {original_width}x{original_height}")
+    print(f"Total frames: {total_frames}")
+    
+    # Decode all frames upfront
+    decoded_frames = []
+    for i in range(total_frames):
+        print(f"Reconstructing frame {i+1}/{total_frames}")
+        frame_blocks = frames[i]
+        frame = reconstruct_frame(frame_blocks, n1, n2, padded_width, padded_height, original_width, original_height)
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)  # Convert for proper display in OpenCV
+        decoded_frames.append(frame)
+
+    # Playback loop from memory
+    current_frame_idx = 0
+    paused = False
+    step = False
 
     while True:
-        # Display current video frame
-        if frame_index < len(frames):
-            frame_bgr = cv2.cvtColor(frames[frame_index], cv2.COLOR_RGB2BGR)
-            cv2.imshow("RGB Video Player", frame_bgr)
-
-        # Keyboard controls
-        key = cv2.waitKey(int(1000 / fps)) & 0xFF
-
-        if key == ord('q'):  # Quit
-            break
-        elif key == ord(' '):  # Play/Pause toggle
-            is_playing = not is_playing
-            if is_playing:
-                pygame.mixer.music.unpause()
+        if not paused or step:
+            if current_frame_idx < total_frames:
+                cv2.imshow("Decoded Video", decoded_frames[current_frame_idx])
+                current_frame_idx += 1
             else:
-                pygame.mixer.music.pause()
-        elif key == ord('n'):  # Next frame
-            is_playing = False
-            pygame.mixer.music.pause()
-            frame_index = min(frame_index + 1, len(frames) - 1)
-            pygame.mixer.music.set_pos(frame_index / fps)  # Sync audio to frame
-        elif key == ord('p'):  # Previous frame
-            is_playing = False
-            pygame.mixer.music.pause()
-            frame_index = max(frame_index - 1, 0)
-            pygame.mixer.music.set_pos(frame_index / fps)  # Sync audio to frame
-        elif key == ord('r'):  # Replay
-            frame_index = 0
-            pygame.mixer.music.stop()
-            pygame.mixer.music.play()
-            is_playing = True
+                current_frame_idx = 0  # loop the video, or break if desired
 
-        # Automatic playback if in play mode
-        if is_playing:
-            frame_index += 1
-            if frame_index >= len(frames):
-                print("End of video reached.")
-                break
+        key = cv2.waitKey(30) & 0xFF
+        if key == ord('q'):
+            break
+        elif key == ord('p'):
+            paused = not paused
+        elif key == ord('s'):
+            paused = True
+            step = True
+        else:
+            step = False
 
-    pygame.mixer.music.stop()
     cv2.destroyAllWindows()
 
-# Example usage
-sample = "Stairs"
-file_path = f"960x540/{sample}.rgb"
-audio_path = f"audio/{sample}.wav"
-width, height = 960, 540
-audio_file  = True
-
-if(audio_file):
-    if os.path.exists(file_path) and os.path.exists(audio_path):
-        frames, total_frames = read_rgb_video(file_path, width, height)
-        print(f"Loaded {total_frames} frames.")
-        play_rgb_video_with_keyboard(frames, audio_path)
-    else:
-        print("Video or audio file not found. Please check the file paths.")
-else:
-    if os.path.exists(file_path) and os.path.exists(audio_path):
-        frames, total_frames = read_rgb_video(file_path, width, height)
-        print(f"Loaded {total_frames} frames.")
-        play_rgb_video_with_keyboard(frames, audio_path)
-    else:
-        print("Video file not found. Please check the file paths.")
+if __name__ == "__main__":
+    main()

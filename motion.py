@@ -24,197 +24,55 @@ def rgb_to_yuv(frame):
     """Convert an RGB frame to YUV color space."""
     return cv2.cvtColor(frame, cv2.COLOR_RGB2YUV)
 
-def compute_motion_vectors(prev_frame, curr_frame, block_size=16, search_method='tss'):
+
+def compute_motion_vectors(prev_y, curr_y, block_size=16):
     """
-    Compute motion vectors using either Three Step Search or Diamond Search.
-    
-    Args:
-        prev_frame: Previous frame (grayscale)
-        curr_frame: Current frame (grayscale)
-        block_size: Size of macroblocks (default: 16x16)
-        search_method: 'tss' for Three Step Search or 'ds' for Diamond Search
+    Compute motion vectors using block-based Mean Absolute Difference (MAD).
+    Parameters:
+        - prev_y: Previous frame's Y component (grayscale).
+        - curr_y: Current frame's Y component (grayscale).
+        - block_size: Size of macroblocks (default: 16x16).
+    Returns:
+        - motion_vectors: Array of motion vectors (dx, dy) for each block.
     """
-    if len(prev_frame.shape) == 3:
-        prev_frame = cv2.cvtColor(prev_frame, cv2.COLOR_BGR2GRAY)
-        curr_frame = cv2.cvtColor(curr_frame, cv2.COLOR_BGR2GRAY)
-        
-    h, w = curr_frame.shape
-    mb_h = h // block_size
-    mb_w = w // block_size
-    vectors = np.zeros((mb_h, mb_w, 2), dtype=np.int32)
+    h, w = curr_y.shape
+    # Motion vector array dimensions (number of blocks)
+    num_blocks_y = h // block_size
+    num_blocks_x = w // block_size
     
-    # Pad frames for border blocks
-    p_size = block_size + 16  # Search area padding
-    prev_pad = cv2.copyMakeBorder(prev_frame, p_size, p_size, p_size, p_size, cv2.BORDER_REPLICATE)
-    
-    for i in range(mb_h):
-        for j in range(mb_w):
-            # Current block position
-            y = i * block_size
-            x = j * block_size
+    print(f"[DEBUG] Frame dimensions: {h}x{w}")
+    print(f"[DEBUG] Macroblock grid: {num_blocks_y}x{num_blocks_x} (YxX)")
+    motion_vectors = np.zeros((num_blocks_y, num_blocks_x, 2), dtype=np.int32)
+    # Pad the frames to ensure consistent block sizes
+    padded_prev = np.pad(prev_y, ((0, block_size), (0, block_size)), mode='constant', constant_values=0)
+    padded_curr = np.pad(curr_y, ((0, block_size), (0, block_size)), mode='constant', constant_values=0)
+    for by in range(num_blocks_y):  # Iterate over blocks in the y-direction
+        for bx in range(num_blocks_x):  # Iterate over blocks in the x-direction
+            y = by * block_size
+            x = bx * block_size
+            block = padded_curr[y:y + block_size, x:x + block_size]
+            best_match = (0, 0)
+            min_mad = float('inf')
+            # print(f"[DEBUG] Processing MAD for block ({by}, {bx}) at ({y}, {x})...")
+            # Search for the best matching block in the padded previous frame
+            for dy in range(-block_size, block_size + 1, 4):  # Search range ±block_size
+                for dx in range(-block_size, block_size + 1, 4):
+                    ref_y = y + dy
+                    ref_x = x + dx
+                    # Ensure search stays within valid bounds of the padded frame
+                    if 0 <= ref_y < padded_prev.shape[0] - block_size and 0 <= ref_x < padded_prev.shape[1] - block_size:
+                        ref_block = padded_prev[ref_y:ref_y + block_size, ref_x:ref_x + block_size]
+                        if ref_block.shape == block.shape:
+                            mad = np.mean(np.abs(block - ref_block))
+                            if mad < min_mad:
+                                min_mad = mad
+                                best_match = (dx, dy)
             
-            # Extract current block
-            curr_block = curr_frame[y:y+block_size, x:x+block_size]
+            motion_vectors[by, bx] = best_match  # Assign motion vector for the block
             
-            # Find motion vector
-            if search_method == 'tss':
-                dy, dx = three_step_search(prev_pad[y:y+block_size*3, x:x+block_size*3], 
-                                        curr_block, block_size)
-            else:  # Diamond search
-                dy, dx = diamond_search(prev_pad[y:y+block_size*3, x:x+block_size*3], 
-                                     curr_block, block_size)
-                
-            vectors[i, j] = [dy, dx]
-            
-    return vectors
-
-def three_step_search(search_area, curr_block, block_size):
-    """Three Step Search algorithm for block matching."""
-    h, w = search_area.shape
-    center_y, center_x = h//2, w//2
-    step_size = 4
-    min_cost = float('inf')
-    best_dy, best_dx = 0, 0
-    
-    while step_size >= 1:
-        for dy in [-step_size, 0, step_size]:
-            for dx in [-step_size, 0, step_size]:
-                y = center_y + dy
-                x = center_x + dx
-                if 0 <= y < h-block_size and 0 <= x < w-block_size:
-                    cost = calculate_mad(search_area[y:y+block_size, x:x+block_size], 
-                                      curr_block)
-                    if cost < min_cost:
-                        min_cost = cost
-                        best_dy, best_dx = dy, dx
-        
-        center_y += best_dy
-        center_x += best_dx
-        step_size //= 2
-        
-    return best_dy-block_size, best_dx-block_size
-
-def diamond_search(search_area, curr_block, block_size):
-    """Diamond Search algorithm for block matching."""
-    h, w = search_area.shape
-    center_y, center_x = h//2, w//2
-    
-    # Large Diamond Search Pattern
-    LDSP = [(0,-2), (-1,-1), (0,-1), (1,-1), (-2,0), (-1,0), (1,0), (2,0),
-            (-1,1), (0,1), (1,1), (0,2)]
-    
-    # Small Diamond Search Pattern
-    SDSP = [(0,-1), (-1,0), (0,0), (1,0), (0,1)]
-    
-    min_cost = float('inf')
-    best_dy, best_dx = 0, 0
-    
-    # First use LDSP
-    while True:
-        best_cost = min_cost
-        for dy, dx in LDSP:
-            y = center_y + dy
-            x = center_x + dx
-            if 0 <= y < h-block_size and 0 <= x < w-block_size:
-                cost = calculate_mad(search_area[y:y+block_size, x:x+block_size], 
-                                  curr_block)
-                if cost < min_cost:
-                    min_cost = cost
-                    best_dy, best_dx = dy, dx
-                    
-        if min_cost == best_cost:  # No improvement, switch to SDSP
-            break
-            
-        center_y += best_dy
-        center_x += best_dx
-    
-    # Finally use SDSP
-    for dy, dx in SDSP:
-        y = center_y + dy
-        x = center_x + dx
-        if 0 <= y < h-block_size and 0 <= x < w-block_size:
-            cost = calculate_mad(search_area[y:y+block_size, x:x+block_size], 
-                              curr_block)
-            if cost < min_cost:
-                min_cost = cost
-                best_dy, best_dx = dy, dx
-                
-    return best_dy-block_size, best_dx-block_size
-
-def calculate_mad(block1, block2):
-    """Calculate Mean Absolute Difference between two blocks."""
-    return np.mean(np.abs(block1.astype(float) - block2.astype(float)))
-
-# def compute_motion_vectors(prev_gray, cur_gray, block_size=16, search_range=4):
-#     """
-#     Compute motion vectors using a brute force block matching (MAD).
-#     Here we use the grayscale images directly.
-#     """
-#     scale_percent = 50  # Reduce size by 50%
-#     width = int(prev_gray.shape[1] * scale_percent / 100)
-#     height = int(prev_gray.shape[0] * scale_percent / 100)
-#     dim = (width, height)
-
-#     prev_gray_small = cv2.resize(prev_gray, dim, interpolation=cv2.INTER_AREA)
-#     cur_gray_small = cv2.resize(cur_gray, dim, interpolation=cv2.INTER_AREA)
-
-#     flow = cv2.calcOpticalFlowFarneback(
-#         prev_gray_small, cur_gray_small, None,
-#         pyr_scale=0.5, levels=2,
-#         winsize=9, iterations=3,
-#         poly_n=5, poly_sigma=1.2, flags=0
-#     )
-
-#     return flow
-
-# def compute_motion_vectors(prev_y, curr_y, block_size=16):
-#     """
-#     Compute motion vectors using block-based Mean Absolute Difference (MAD).
-#     Parameters:
-#         - prev_y: Previous frame's Y component (grayscale).
-#         - curr_y: Current frame's Y component (grayscale).
-#         - block_size: Size of macroblocks (default: 16x16).
-#     Returns:
-#         - motion_vectors: Array of motion vectors (dx, dy) for each block.
-#     """
-#     h, w = curr_y.shape
-#     # Motion vector array dimensions (number of blocks)
-#     num_blocks_y = h // block_size
-#     num_blocks_x = w // block_size
-    
-#     print(f"[DEBUG] Frame dimensions: {h}x{w}")
-#     print(f"[DEBUG] Macroblock grid: {num_blocks_y}x{num_blocks_x} (YxX)")
-#     motion_vectors = np.zeros((num_blocks_y, num_blocks_x, 2), dtype=np.int32)
-#     # Pad the frames to ensure consistent block sizes
-#     padded_prev = np.pad(prev_y, ((0, block_size), (0, block_size)), mode='constant', constant_values=0)
-#     padded_curr = np.pad(curr_y, ((0, block_size), (0, block_size)), mode='constant', constant_values=0)
-#     for by in range(num_blocks_y):  # Iterate over blocks in the y-direction
-#         for bx in range(num_blocks_x):  # Iterate over blocks in the x-direction
-#             y = by * block_size
-#             x = bx * block_size
-#             block = padded_curr[y:y + block_size, x:x + block_size]
-#             best_match = (0, 0)
-#             min_mad = float('inf')
-#             # print(f"[DEBUG] Processing MAD for block ({by}, {bx}) at ({y}, {x})...")
-#             # Search for the best matching block in the padded previous frame
-#             for dy in range(-block_size, block_size + 1, 4):  # Search range ±block_size
-#                 for dx in range(-block_size, block_size + 1, 4):
-#                     ref_y = y + dy
-#                     ref_x = x + dx
-#                     # Ensure search stays within valid bounds of the padded frame
-#                     if 0 <= ref_y < padded_prev.shape[0] - block_size and 0 <= ref_x < padded_prev.shape[1] - block_size:
-#                         ref_block = padded_prev[ref_y:ref_y + block_size, ref_x:ref_x + block_size]
-#                         if ref_block.shape == block.shape:
-#                             mad = np.mean(np.abs(block - ref_block))
-#                             if mad < min_mad:
-#                                 min_mad = mad
-#                                 best_match = (dx, dy)
-            
-#             motion_vectors[by, bx] = best_match  # Assign motion vector for the block
-            
-#         # print(f"[DEBUG] Processed row {by + 1}/{num_blocks_y} of macroblocks.")
-#     print(f"[DEBUG] Motion vectors computed for the entire frame.")
-#     return motion_vectors
+        # print(f"[DEBUG] Processed row {by + 1}/{num_blocks_y} of macroblocks.")
+    print(f"[DEBUG] Motion vectors computed for the entire frame.")
+    return motion_vectors
 
 
 def segment_frame(motion_vectors, threshold=2):

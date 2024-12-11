@@ -105,9 +105,7 @@ def process_video(frames, block_size=16, threshold=2):
         curr_frame = rgb_to_yuv(frames[i])
         curr_y = curr_frame[:, :, 0]  # Y component
         
-        # motion_vectors = compute_motion_vectors(prev_y, curr_y, block_size)
-        motion_vectors = compute_motion_vectors(prev_y, curr_y, block_size=16, search_method='tss')
-        # motion_vectors = compute_motion_vectors(prev_y, curr_y, block_size=16, search_method='ds')
+        motion_vectors = compute_motion_vectors(prev_y, curr_y, block_size)
         
         print(f"[DEBUG] Motion vectors computed for frame {i}.")
         segmentation = segment_frame(motion_vectors, threshold)

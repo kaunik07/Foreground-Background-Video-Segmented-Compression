@@ -3,18 +3,58 @@ import numpy as np
 import cv2
 from scipy.fftpack import dct, idct
 import os
+import time
+# from line_profiler import LineProfiler
 
-def blockify(image, block_size=16):
-    """Divide image into non-overlapping block_size x block_size blocks."""
-    h, w = image.shape[:2]
-    blocks = []
-    for y in range(0, h, block_size):
-        for x in range(0, w, block_size):
-            block = image[y:y+block_size, x:x+block_size]
-            blocks.append((y, x, block))
-    return blocks
 
-def compute_motion_vectors(prev_frame, cur_frame, block_size=16, search_range=4):
+def compute_motion_vectors_phase_corr(prev_frame, cur_frame, block_size=16):
+    prev_gray = prev_frame[:, :, 0].astype(np.float32)
+    cur_gray = cur_frame[:, :, 0].astype(np.float32)
+    
+    h, w = cur_gray.shape
+    vectors = np.zeros((h // block_size, w // block_size, 2), dtype=np.int32)
+
+    for by in range(0, h, block_size):
+        for bx in range(0, w, block_size):
+            cur_block = cur_gray[by:by + block_size, bx:bx + block_size]
+            ref_block = prev_gray[by:by + block_size, bx:bx + block_size]
+
+            # Use Phase Correlation to find motion
+            shift = cv2.phaseCorrelate(ref_block, cur_block)
+            vectors[by // block_size, bx // block_size] = [int(shift[0][1]), int(shift[0][0])]
+
+    return vectors
+
+def compute_motion_vectors_ssd(prev_frame, cur_frame, block_size=16, search_range=4):
+    prev_gray = prev_frame[:, :, 0].astype(np.float32)
+    cur_gray = cur_frame[:, :, 0].astype(np.float32)
+    
+    h, w = cur_gray.shape
+    vectors = np.zeros((h // block_size, w // block_size, 2), dtype=np.int32)
+
+    for by in range(0, h, block_size):
+        for bx in range(0, w, block_size):
+            cur_block = cur_gray[by:by + block_size, bx:bx + block_size]
+            best_mv = (0, 0)
+            best_ssd = float('inf')
+
+            for dy in range(-search_range, search_range + 1):
+                for dx in range(-search_range, search_range + 1):
+                    ref_y = by + dy
+                    ref_x = bx + dx
+                    if ref_y < 0 or ref_y + block_size > h or ref_x < 0 or ref_x + block_size > w:
+                        continue
+                    
+                    ref_block = prev_gray[ref_y:ref_y + block_size, ref_x:ref_x + block_size]
+                    ssd = np.sum((cur_block - ref_block) ** 2)
+                    
+                    if ssd < best_ssd:
+                        best_ssd = ssd
+                        best_mv = (dy, dx)
+            vectors[by // block_size, bx // block_size] = best_mv
+    return vectors
+
+def compute_motion_vectors_mad(prev_frame, cur_frame, block_size=16, search_range=4):
     """
     Compute motion vectors using a brute force block matching (MAD).
     Here we only use the R channel for simplicity, or convert to Y and use Y.
@@ -48,6 +88,8 @@ def compute_motion_vectors(prev_frame, cur_frame, block_size=16, search_range=4)
             vectors[by//block_size, bx//block_size] = best_mv
     return vectors
 
+
+
 def segment_foreground_background(motion_vectors, threshold=2):
     """
     Segment into foreground and background using motion vector consistency.
@@ -79,12 +121,12 @@ def rgb_to_blocks(frame, block_size=8):
     return r_blocks, g_blocks, b_blocks
 
 def block_dct(block):
-    """Compute 2D DCT of an 8x8 block."""
-    return dct(dct(block.astype(np.float32), axis=0, norm='ortho'), axis=1, norm='ortho')
+    """Compute 2D DCT of an 8x8 block using OpenCV."""
+    return cv2.dct(block.astype(np.float32))
 
 def block_idct(coeff_block):
-    """Compute inverse DCT of an 8x8 block."""
-    return idct(idct(coeff_block, axis=1, norm='ortho'), axis=0, norm='ortho')
+    """Compute inverse DCT of an 8x8 block using OpenCV."""
+    return cv2.idct(coeff_block)
 
 def quantize_block(dct_block, q_step):
     """Uniform quantization with step = 2^(q_step)."""
@@ -95,6 +137,7 @@ def dequantize_block(q_block, q_step):
     Q = 2**q_step
     return q_block * Q
 
+
 def encode_frame(frame, fg_mask, n1, n2, block_size=8):
     """
     Encode one frame:
@@ -102,13 +145,8 @@ def encode_frame(frame, fg_mask, n1, n2, block_size=8):
     2) Compute DCT and quantize using either n1 or n2.
     3) Output: [(block_type, [Rcoeffs], [Gcoeffs], [Bcoeffs]) ...]
     """
+    # encode_start = time.time()
     h, w, _ = frame.shape
-    # Convert fg_mask for 16x16 macroblocks to 8x8 block labeling
-    # Each macroblock = 16x16, which contains 4 blocks of 8x8
-    # so we need to upscale fg_mask or apply it consistently.
-    # We'll assume width & height divisible by 16.
-    mb_rows = h//16
-    mb_cols = w//16
 
     # DCT at 8x8 level
     # First get all 8x8 blocks
@@ -163,21 +201,43 @@ def read_rgb_file(filename, width, height, num_frames):
             frames.append(frame)
     return frames
 
+
 def write_cmp_file(filename, n1, n2, all_frame_blocks):
     """
-    Write the compressed data to a .cmp file in the specified format:
-    First line: n1 n2
-    Then for each block: block_type followed by 64 Rcoeffs, 64 Gcoeffs, 64 Bcoeffs.
+    Optimized writing of compressed data to .cmp file
     """
+    write_start = time.time()
     print("Writing compressed data to", filename)
-    with open(filename, 'w') as f:
+    
+    # Pre-calculate total number of blocks
+    total_blocks = sum(len(frame_blocks) for frame_blocks in all_frame_blocks)
+    
+    # Pre-allocate array for all data
+    all_data = np.zeros((total_blocks, 193), dtype=np.int32)  # 1 block_type + 3*64 coeffs
+    
+    # Fill array with data
+    idx = 0
+    for frame_blocks in all_frame_blocks:
+        for block_type, r_coeffs, g_coeffs, b_coeffs in frame_blocks:
+            all_data[idx, 0] = block_type
+            all_data[idx, 1:65] = r_coeffs.flatten()
+            all_data[idx, 65:129] = g_coeffs.flatten()
+            all_data[idx, 129:193] = b_coeffs.flatten()
+            idx += 1
+    
+    # Write to file using buffer
+    with open(filename, 'w', buffering=1024*1024) as f:
+        # Write header
         f.write(f"{n1} {n2}\n")
-        for frame_blocks in all_frame_blocks:
-            for (block_type, r_coeffs, g_coeffs, b_coeffs) in frame_blocks:
-                data_line = [str(block_type)] + list(map(str, r_coeffs)) + list(map(str, g_coeffs)) + list(map(str, b_coeffs))
-                f.write(" ".join(data_line) + "\n")
-
-
+        
+        # Convert array to string efficiently
+        np.savetxt(f, all_data, fmt='%d', delimiter=' ')
+        
+    write_time = time.time() - write_start
+    print(f"File writing time: {write_time:.3f} seconds")
+    print(f"Saved {total_blocks} blocks to {filename}")
+    
+    
 def pad_frame(frame, pad_height, pad_width):
     """
     Pad the frame to be divisible by 16 in both dimensions.
@@ -190,27 +250,21 @@ def pad_frame(frame, pad_height, pad_width):
     padded[:h, :w, :] = frame
     return padded, h, w, new_h, new_w
 
-def main():
-    # if len(sys.argv) != 4:
-    #     print("Usage: myencoder.exe input_video.rgb n1 n2")
-    #     return
 
-    sample = "WalkingMovingBackground"
-    file_path = f"960x540/{sample}.rgb"
-    input_file = file_path
-    n1 = 2
-    n2 = 4
+def main():
+    
+    start_time = time.time()
+    
+    input_file = sys.argv[1]
+    n1 = int(sys.argv[2])
+    n2 = int(sys.argv[3])
+    output_file = os.path.splitext(os.path.basename(input_file))[0]
+    output_file = f"{output_file}.cmp"
 
     # Suppose your 540p video is 960x540
     width = 960
     height = 540
-    # The problem states we must have multiples of 16. 540 is not a multiple of 16.
-    # We'll pad the frame.
-    # height needs to be padded up to 544 (34 * 16)
-    # width is 960, which is divisible by 16 (16*60=960), so no padding for width needed.
-    # But let's write code that handles padding generally.
-
-    num_frames = 30  # adjust as per actual input
+    
     frame_size = width * height * 3  # 3 bytes per pixel for RGB
     # Get the total file size
     file_size = os.path.getsize(input_file)
@@ -219,8 +273,7 @@ def main():
 
     frames = read_rgb_file(input_file, width, height, num_frames)
 
-    # Pad frames so that height and width are multiples of 16
-    # After padding, height = 544, width = 960
+
     padded_frames = []
     for f in frames:
         pframe, orig_h, orig_w, new_h, new_w = pad_frame(f, 16, 16)
@@ -230,8 +283,10 @@ def main():
     all_frame_blocks = []
     prev_frame = None
 
+    total_encode_start = time.time()
     print(f"Encoding {len(padded_frames)} frames...")
     for i, frame in enumerate(padded_frames):
+        each_frame_start = time.time()
         print(f"Processing frame {i+1}/{len(padded_frames)}")
         if i == 0:
             # First frame is I-frame
@@ -239,16 +294,36 @@ def main():
             mb_cols = (frame.shape[1] // 16)
             fg_mask = np.zeros((mb_rows, mb_cols), dtype=bool)
         else:
-            motion_vectors = compute_motion_vectors(prev_frame, frame)
+            motion_vectors = compute_motion_vectors_phase_corr(prev_frame, frame)
+            # motion_vectors = compute_motion_vectors_ssd(prev_frame, frame)
             fg_mask = segment_foreground_background(motion_vectors)
 
+        print("Encoding frame...")
         frame_blocks = encode_frame(frame, fg_mask, n1, n2, block_size=8)
+        
+        # print("Adding frame to output_blocks...")
         all_frame_blocks.append(frame_blocks)
         prev_frame = frame
 
-    output_file = f"{sample}.cmp"
+        each_frame_time = time.time() - each_frame_start
+        print(f"Frame processing time: {each_frame_time:.3f} seconds")
+    
+    
+    print(f"Detected resolution: {width}x{height}")
+    print(f"Detected number of frames: {num_frames}")
+    
+    total_encode_time = time.time() - total_encode_start
+    print(f"Total encoding time: {total_encode_time/60:.3f} minutes")
+        
+    write_time_start = time.time()
     write_cmp_file(output_file, n1, n2, all_frame_blocks)
+    write_time_end = time.time() - write_time_start
+    print(f"File writing time: {write_time_end/60:.3f} minutes")
+    
     print(f"Compression complete. Output: {output_file}")
+    
+    end_time = time.time()
+    print(f"Total execution time: {(end_time - start_time)/60} minutes")
 
 if __name__ == "__main__":
     main()

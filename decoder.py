@@ -48,8 +48,6 @@ def block_idct_batch(coeffs):
         # return cv2.idct(coeffs)
         return idct(idct(coeffs, axis=2, norm='ortho'), axis=1, norm='ortho')
 
-
-
 def reconstruct_frame_fast(frame_blocks, n1, n2, padded_width, padded_height, original_width, original_height):
     block_size = 8
     blocks_per_row = padded_width // block_size
@@ -81,7 +79,6 @@ def reconstruct_frame_fast(frame_blocks, n1, n2, padded_width, padded_height, or
         reconstructed[y:y+block_size, x:x+block_size] = blocks[:, i].transpose(1, 2, 0)
     
     return reconstructed[:original_height, :original_width]
-
 
 def read_cmp_file(filename):
     with open(filename, 'r') as f:
@@ -178,6 +175,11 @@ def playback(decoded_frames):
             current_frame_idx = (current_frame_idx - 1) % total_frames
             frame = decoded_frames[current_frame_idx]
             cv2.imshow("Decoded Video", frame)
+        elif key == ord('r'):  # Reset playback to the beginning
+            paused = True
+            current_frame_idx = 0
+            frame = decoded_frames[current_frame_idx]
+            cv2.imshow("Decoded Video", frame)
 
     cv2.destroyAllWindows()
 
@@ -254,6 +256,13 @@ def playback_with_audio(decoded_frames, audio_file, fps=30):
             cv2.imshow("Decoded Video", frame)
             # Update audio position
             wf.setpos(frame_index * audio_frames_per_video_frame)
+        elif key == ord('r'):  # Reset playback to the beginning
+            paused = True
+            frame_index = 0
+            wf.rewind()  # Reset audio to the beginning
+            start_time = time.time()  # Reset playback timing
+            frame = decoded_frames[frame_index]
+            cv2.imshow("Decoded Video", frame)
 
     # Cleanup
     cv2.destroyAllWindows()

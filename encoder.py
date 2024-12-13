@@ -88,8 +88,6 @@ def compute_motion_vectors_mad(prev_frame, cur_frame, block_size=16, search_rang
             vectors[by//block_size, bx//block_size] = best_mv
     return vectors
 
-
-
 def segment_foreground_background(motion_vectors, threshold=2):
     """
     Segment into foreground and background using motion vector consistency.
@@ -136,7 +134,6 @@ def quantize_block(dct_block, q_step):
 def dequantize_block(q_block, q_step):
     Q = 2**q_step
     return q_block * Q
-
 
 def encode_frame(frame, fg_mask, n1, n2, block_size=8):
     """
@@ -201,7 +198,6 @@ def read_rgb_file(filename, width, height, num_frames):
             frames.append(frame)
     return frames
 
-
 def write_cmp_file(filename, n1, n2, all_frame_blocks):
     """
     Optimized writing of compressed data to .cmp file
@@ -237,7 +233,6 @@ def write_cmp_file(filename, n1, n2, all_frame_blocks):
     print(f"File writing time: {write_time:.3f} seconds")
     print(f"Saved {total_blocks} blocks to {filename}")
     
-    
 def pad_frame(frame, pad_height, pad_width):
     """
     Pad the frame to be divisible by 16 in both dimensions.
@@ -249,7 +244,6 @@ def pad_frame(frame, pad_height, pad_width):
     padded = np.zeros((new_h, new_w, c), dtype=frame.dtype)
     padded[:h, :w, :] = frame
     return padded, h, w, new_h, new_w
-
 
 def main():
     
